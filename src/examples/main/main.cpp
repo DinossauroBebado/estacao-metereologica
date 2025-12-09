@@ -1,7 +1,7 @@
 /**
  * @file main.cpp
- * @brief Sistema Integrado: UV, BME280, Servos, OLED e Alertas
- * @author Gemini AI (Baseado nos códigos do usuário)
+ * @brief Sistema Integrado: Tracker Solar, UV, BME280 e Display com Diagnóstico de Erro
+ * @author Gemini AI
  */
 
 #include <Arduino.h>
@@ -12,53 +12,56 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 #include <ESP32Servo.h>
-#include "GYML8511.h" // Nossa biblioteca personalizada
+#include "GYML8511.h"
+#include "SunTracker.h"
 
 // --- Definições de Hardware ---
 #define PIN_LED_RED 2
 #define PIN_LED_BLUE 4
 #define PIN_BUZZER 23
-#define PIN_SERVO_1 27
-#define PIN_SERVO_2 26
-#define PIN_UV_IN 32
+#define PIN_SERVO_X 26
+#define PIN_SERVO_Y 27
 
-// --- Configuração do OLED ---
+// --- Entradas/Sensores ---
+#define PIN_UV_IN 32
+#define LDR_TOP_LEFT 34
+#define LDR_TOP_RIGHT 39
+#define LDR_BOT_LEFT 35
+#define LDR_BOT_RIGHT 36
+
+// --- Limiares de Alarme (Conforme seu pedido) ---
+#define ALARM_TEMP 40.0
+#define ALARM_HUM 80.0
+#define ALARM_PRES 100.0 // Obs: Pressão normal é ~1013. Se for 100, vai apitar sempre (exceto se mudar a lógica).
+#define ALARM_UV 200.0
+
+// --- Objetos ---
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// --- Configuração do BME280 ---
-#define SEALEVELPRESSURE_HPA (1013.25)
-Adafruit_BME280 bme; // I2C
-
-// --- Configuração do Sensor UV ---
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+Adafruit_BME280 bme;
 GYML8511 uvSensor(PIN_UV_IN, 3.3);
+SunTracker solarTracker(LDR_TOP_LEFT, LDR_TOP_RIGHT, LDR_BOT_LEFT, LDR_BOT_RIGHT, PIN_SERVO_X, PIN_SERVO_Y);
 
-// --- Configuração dos Servos ---
-Servo servo1;
-Servo servo2;
-int servoPos = 0; // Posição atual
-int servoDir = 1; // Direção: 1 = aumentando, -1 = diminuindo
-
-// --- Variáveis Globais de Dados (Cache) ---
+// --- Variáveis Globais ---
 float dataTemp = 0.0;
 float dataHum = 0.0;
 float dataPres = 0.0;
 float dataAlt = 0.0;
 float dataUV = 0.0;
 
-// --- Timers para Multitarefa (millis) ---
-unsigned long lastServoTime = 0;
+// Flags de Estado
+bool alarmActive = false;
+bool blinkState = false;
+
+// --- Timers ---
+unsigned long lastTrackerTime = 0;
 unsigned long lastSensorTime = 0;
 unsigned long lastDisplayTime = 0;
 unsigned long lastBlinkTime = 0;
 
-// Estado dos LEDs para alternância
-bool blinkState = false;
-
-// --- Protótipos das Funções ---
-void taskServos();
+// --- Protótipos ---
+void taskTracker();
 void taskSensors();
 void taskDisplay();
 void taskIndicators();
@@ -67,17 +70,16 @@ void setup()
 {
     Serial.begin(115200);
 
-    // 1. Inicializa LEDs e Buzzer
+    // Outputs
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_BLUE, OUTPUT);
     pinMode(PIN_BUZZER, OUTPUT);
     digitalWrite(PIN_LED_RED, LOW);
-    digitalWrite(PIN_LED_BLUE, LOW);
 
-    // 2. Inicializa OLED
+    // Display
     if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
     {
-        Serial.println(F("Falha ao iniciar SSD1306"));
+        Serial.println(F("Falha Display"));
         for (;;)
             ;
     }
@@ -85,59 +87,47 @@ void setup()
     display.setTextColor(WHITE);
     display.setTextSize(1);
     display.setCursor(0, 0);
-    display.println("Iniciando Sistema...");
+    display.println("Iniciando...");
     display.display();
 
-    // 3. Inicializa BME280
+    // Sensores
     if (!bme.begin(0x76))
-    { // Tenta endereço 0x76
-        Serial.println("Falha ao iniciar BME280! Verifique cabos.");
-        display.println("Erro BME280");
-        display.display();
-        // Não travamos o código aqui para permitir testes de outros componentes
-    }
-
-    // 4. Inicializa Sensor UV
+        Serial.println("Erro BME280");
     uvSensor.begin();
 
-    // 5. Inicializa Servos
-    servo1.setPeriodHertz(50);
-    servo1.attach(PIN_SERVO_1, 500, 2400);
-    servo2.setPeriodHertz(50);
-    servo2.attach(PIN_SERVO_2, 500, 2400);
+    // Tracker
+    solarTracker.begin();
+    solarTracker.setTolerance(50);
 
-    delay(1000); // Breve pausa para leitura da splash screen
+    delay(1000);
 }
 
 void loop()
 {
     unsigned long currentMillis = millis();
 
-    // Agendador de Tarefas (Scheduler)
-
-    // Tarefa 1: Mover Servos (A cada 15ms)
-    if (currentMillis - lastServoTime >= 50)
+    // 1. Tracker (50ms)
+    if (currentMillis - lastTrackerTime >= 50)
     {
-        lastServoTime = currentMillis;
-        taskServos();
+        lastTrackerTime = currentMillis;
+        taskTracker();
     }
 
-    // Tarefa 2: Ler Sensores (A cada 1000ms)
+    // 2. Sensores (1000ms)
     if (currentMillis - lastSensorTime >= 1000)
     {
         lastSensorTime = currentMillis;
         taskSensors();
     }
 
-    // Tarefa 3: Atualizar Display (A cada 200ms)
-    // Atualizar rápido demais deixa o display lento
+    // 3. Display (200ms)
     if (currentMillis - lastDisplayTime >= 200)
     {
         lastDisplayTime = currentMillis;
         taskDisplay();
     }
 
-    // Tarefa 4: Piscar LEDs e Buzzer (A cada 500ms)
+    // 4. Indicadores (500ms)
     if (currentMillis - lastBlinkTime >= 500)
     {
         lastBlinkTime = currentMillis;
@@ -145,106 +135,115 @@ void loop()
     }
 }
 
-// --- Implementação das Tarefas ---
+// --- Funções ---
 
-/**
- * @brief Move os servos de um lado para o outro suavemente
- */
-void taskServos()
+void taskTracker()
 {
-    servoPos += servoDir; // Incrementa ou decrementa posição
-
-    // Inverte a direção nos limites
-    if (servoPos >= 180 || servoPos <= 0)
-    {
-        servoDir = -servoDir;
-    }
-
-    servo1.write(servoPos);
-    servo2.write(servoPos);
+    solarTracker.update();
 }
 
-/**
- * @brief Lê dados do BME280 e GY-ML8511
- */
 void taskSensors()
 {
-    // Leitura BME280
-    dataTemp = bme.readTemperature();
-    dataHum = bme.readHumidity();
-    dataPres = bme.readPressure() / 100.0F; // hPa
-    dataAlt = bme.readAltitude(SEALEVELPRESSURE_HPA);
+    // --- MODO TESTE (Altere os valores manualmente para ver o alarme) ---
+    // Ex: Coloque dataTemp = 45 para ver o erro de temperatura
+    dataTemp = 25.0;
+    dataHum = 60.0;
+    dataPres = 1013.0;
+    dataUV = 10.0;
 
-    // Leitura UV (usando nossa lib)
-    dataUV = uvSensor.readUVIntensity();
-
-    // Log Serial (Opcional, para debug)
-    Serial.printf("T:%.1f H:%.1f P:%.1f UV:%.2f Servo:%d\n",
-                  dataTemp, dataHum, dataPres, dataUV, servoPos);
+    // Se tiver os sensores reais conectados, descomente abaixo:
+    // dataTemp = bme.readTemperature();
+    // dataHum = bme.readHumidity();
+    // dataPres = bme.readPressure() / 100.0F;
+    // dataUV = uvSensor.readUVIntensity();
 }
 
-/**
- * @brief Atualiza a interface gráfica no OLED
- */
 void taskDisplay()
 {
     display.clearDisplay();
-
-    // Cabeçalho - Ângulo do Servo
     display.setTextSize(1);
     display.setCursor(0, 0);
-    display.print("Servo Angulo: ");
-    display.print(servoPos);
-    display.print((char)247); // Símbolo de grau
 
-    // Linha divisória
+    // --- Lógica de Diagnóstico para o Cabeçalho ---
+    String msgHeader = "Status: NORMAL";
+
+    // Verifica qual variável está ruim para mostrar no topo
+    // A ordem abaixo define a prioridade da mensagem se houver múltiplos erros
+    if (dataUV > ALARM_UV)
+        msgHeader = "ALERTA: UV ALTO!";
+    else if (dataTemp > ALARM_TEMP)
+        msgHeader = "ALERTA: TEMP ALTA!";
+    else if (dataHum > ALARM_HUM)
+        msgHeader = "ALERTA: UMID ALTA!";
+    else if (dataPres > ALARM_PRES)
+        msgHeader = "ALERTA: PRESSAO!";
+
+    display.println(msgHeader);
     display.drawLine(0, 10, 128, 10, WHITE);
 
-    // Dados Climáticos
+    // --- Exibição dos Valores com Marcador Individual ---
+
+    // Temperatura
     display.setCursor(0, 14);
     display.printf("Temp: %.1f C", dataTemp);
+    if (dataTemp > ALARM_TEMP)
+        display.print(" (!)"); // Marcador de erro
 
+    // Umidade
     display.setCursor(0, 24);
     display.printf("Umid: %.1f %%", dataHum);
+    if (dataHum > ALARM_HUM)
+        display.print(" (!)");
 
+    // Pressão
     display.setCursor(0, 34);
     display.printf("Pres: %.0f hPa", dataPres);
+    if (dataPres > ALARM_PRES)
+        display.print(" (!)");
 
+    // UV
     display.setCursor(0, 44);
-    display.printf("Alt:  %.0f m", dataAlt);
-
-    // Dados UV com destaque
-    display.setCursor(0, 54);
-    display.print("UV: ");
-    display.print(dataUV, 2);
-    display.print(" mW/cm2");
+    display.printf("UV:   %.2f", dataUV);
+    if (dataUV > ALARM_UV)
+        display.print(" (!)");
 
     display.display();
 }
 
-/**
- * @brief Alterna LEDs e emite BIP curto
- */
 void taskIndicators()
 {
-    blinkState = !blinkState;
+    // Verifica todas as condições
+    bool t = (dataTemp > ALARM_TEMP);
+    bool h = (dataHum > ALARM_HUM);
+    bool p = (dataPres > ALARM_PRES);
+    bool u = (dataUV > ALARM_UV);
 
-    if (blinkState)
+    // Se ALGUMA for verdadeira
+    if (t || h || p || u)
     {
-        // Estado A: Vermelho LIGADO, Azul DESLIGADO
-        digitalWrite(PIN_LED_RED, HIGH);
-        digitalWrite(PIN_LED_BLUE, LOW);
+        alarmActive = true;
+        blinkState = !blinkState;
 
-        // Emite um bip curto agudo (2000Hz por 50ms)
-        tone(PIN_BUZZER, 2000, 50);
+        if (blinkState)
+        {
+            digitalWrite(PIN_LED_RED, HIGH);
+            tone(PIN_BUZZER, 2000);
+        }
+        else
+        {
+            digitalWrite(PIN_LED_RED, LOW);
+            noTone(PIN_BUZZER);
+        }
+        digitalWrite(PIN_LED_BLUE, LOW); // Azul apaga no erro
     }
     else
     {
-        // Estado B: Vermelho DESLIGADO, Azul LIGADO
+        alarmActive = false;
         digitalWrite(PIN_LED_RED, LOW);
-        digitalWrite(PIN_LED_BLUE, HIGH);
+        noTone(PIN_BUZZER);
 
-        // Emite um bip curto mais grave (1000Hz por 50ms)
-        tone(PIN_BUZZER, 1000, 50);
+        // Blink suave no Azul para indicar funcionamento
+        blinkState = !blinkState;
+        digitalWrite(PIN_LED_BLUE, blinkState ? HIGH : LOW);
     }
 }
