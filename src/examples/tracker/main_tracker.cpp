@@ -8,7 +8,7 @@
 #define LDR_BOT_RIGHT 36 // left
 #define SERVO_X_PIN 26
 #define SERVO_Y_PIN 27
-
+// #define SOLAR_PIN 33
 SunTracker solarTracker(LDR_TOP_LEFT, LDR_TOP_RIGHT, LDR_BOT_LEFT, LDR_BOT_RIGHT, SERVO_X_PIN, SERVO_Y_PIN);
 
 // Timer para o Debug
@@ -19,6 +19,7 @@ void setup()
     Serial.begin(9600);
     solarTracker.begin();
     solarTracker.setTolerance(50);
+    // pinMode(SOLAR_PIN, INPUT);
 }
 
 void loop()
@@ -31,6 +32,7 @@ void loop()
     {
         lastDebugTime = millis();
         solarTracker.debug();
+        // Serial.println(analogRead(SOLAR_PIN));
     }
 
     delay(50);

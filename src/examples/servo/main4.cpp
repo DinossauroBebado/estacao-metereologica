@@ -21,20 +21,22 @@ void setup()
 
 void loop()
 {
-    for (int posDegrees = 0; posDegrees <= 180; posDegrees++)
-    {
-        servo1.write(posDegrees);
-        servo2.write(posDegrees);
-        Serial.println(posDegrees);
-        delay(20);
-    }
+    // for (int posDegrees = 0; posDegrees <= 180; posDegrees++)
+    // {
+    //     servo1.write(posDegrees);
+    //     servo2.write(posDegrees);
+    //     Serial.println(posDegrees);
+    //     delay(20);
+    // }
 
-    for (int posDegrees = 180; posDegrees >= 0; posDegrees--)
-    {
-        servo1.write(posDegrees);
-        servo2.write(posDegrees);
+    // for (int posDegrees = 180; posDegrees >= 0; posDegrees--)
+    // {
+    //     servo1.write(posDegrees);
+    //     servo2.write(posDegrees);
 
-        Serial.println(posDegrees);
-        delay(20);
-    }
+    //     Serial.println(posDegrees);
+    //     delay(20);
+    // }
+    servo1.write(90);
+    servo2.write(90);
 }
